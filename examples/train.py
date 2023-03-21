@@ -10,6 +10,7 @@ from mmcv.parallel import MMDataParallel
 from mmcv.runner import EpochBasedRunner
 from mmcv.utils import get_logger
 
+import os
 
 class Model(nn.Module):
 
