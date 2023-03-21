@@ -82,4 +82,5 @@ if __name__ == '__main__':
         checkpoint_config=checkpoint_config,
         log_config=log_config)
 
-    runner.run([trainloader], [('train', 1)])
+    ckpt_path = '/root/data/zheyu/ckpt/convnet'
+    runner.run(ckpt_path, [trainloader], [('train', 1)])

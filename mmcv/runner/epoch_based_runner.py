@@ -15,6 +15,7 @@ from .builder import RUNNERS
 from .checkpoint import save_checkpoint
 from .utils import get_host_info
 
+from aimaster.python.pytorch.checkpoint import CheckpointManager as CkptManager
 
 @RUNNERS.register_module()
 class EpochBasedRunner(BaseRunner):
@@ -39,14 +40,14 @@ class EpochBasedRunner(BaseRunner):
             self.log_buffer.update(outputs['log_vars'], outputs['num_samples'])
         self.outputs = outputs
 
-    def train(self, data_loader, **kwargs):
+    def train(self, epoch, ckpt_mgr, data_loader, **kwargs):
         self.model.train()
         self.mode = 'train'
         self.data_loader = data_loader
         self._max_iters = self._max_epochs * len(self.data_loader)
         self.call_hook('before_train_epoch')
         time.sleep(2)  # Prevent possible deadlock during epoch transition
-        for i, data_batch in enumerate(self.data_loader):
+        for i, data_batch in enumerate(ckpt_mgr.data_loader(self.data_loader)):
             self.data_batch = data_batch
             self._inner_iter = i
             self.call_hook('before_train_iter')
@@ -57,9 +58,10 @@ class EpochBasedRunner(BaseRunner):
 
         self.call_hook('after_train_epoch')
         self._epoch += 1
+        print('Epoch:  {}  \tTraining: {:.6f}'.format(epoch, self.outputs))
 
     @torch.no_grad()
-    def val(self, data_loader, **kwargs):
+    def val(self, epoch, ckpt_mgr, data_loader, **kwargs):
         self.model.eval()
         self.mode = 'val'
         self.data_loader = data_loader
@@ -73,8 +75,10 @@ class EpochBasedRunner(BaseRunner):
             self.call_hook('after_val_iter')
             del self.data_batch
         self.call_hook('after_val_epoch')
+        print('Epoch:  {}  \tTesting: {:.6f}'.format(epoch, self.outputs))
 
     def run(self,
+            ckpt_path,
             data_loaders: List[DataLoader],
             workflow: List[Tuple[str, int]],
             max_epochs: Optional[int] = None,
@@ -107,6 +111,8 @@ class EpochBasedRunner(BaseRunner):
                 self._max_iters = self._max_epochs * len(data_loaders[i])
                 break
 
+        ckpt_mgr = CkptManager(ckpt_path, self.model, self._max_epochs)
+
         work_dir = self.work_dir if self.work_dir is not None else 'NONE'
         self.logger.info('Start running, host: %s, work_dir: %s',
                          get_host_info(), work_dir)
@@ -116,24 +122,30 @@ class EpochBasedRunner(BaseRunner):
                          self._max_epochs)
         self.call_hook('before_run')
 
-        while self.epoch < self._max_epochs:
+        for epoch in ckpt_mgr.epoch_iter:
+            ckpt_mgr.init_value('wf_counter', 0)
             for i, flow in enumerate(workflow):
-                mode, epochs = flow
-                if isinstance(mode, str):  # self.train()
-                    if not hasattr(self, mode):
-                        raise ValueError(
-                            f'runner has no method named "{mode}" to run an '
-                            'epoch')
-                    epoch_runner = getattr(self, mode)
-                else:
-                    raise TypeError(
-                        'mode in workflow must be a str, but got {}'.format(
-                            type(mode)))
+                if i >= ckpt_mgr.get_value('wf_counter'):
+                    mode, epochs = flow
+                    if isinstance(mode, str):  # self.train()
+                        if not hasattr(self, mode):
+                            raise ValueError(
+                                f'runner has no method named "{mode}" to run an '
+                                'epoch')
+                        epoch_runner = getattr(self, mode)
+                    else:
+                        raise TypeError(
+                            'mode in workflow must be a str, but got {}'.format(
+                                type(mode)))
 
-                for _ in range(epochs):
-                    if mode == 'train' and self.epoch >= self._max_epochs:
-                        break
-                    epoch_runner(data_loaders[i], **kwargs)
+                    ckpt_mgr.init_value('run_epoch_counter', 0)
+                    for e in range(epochs):
+                        if e >= ckpt_mgr.get_value('run_epoch_counter'):
+                            if mode == 'train' and self.epoch >= self._max_epochs:
+                                break
+                            epoch_runner(epoch+1, ckpt_mgr, data_loaders[i], **kwargs)
+                        ckpt_mgr.set_value('run_epoch_counter', ckpt_mgr.get_value('run_epoch_counter') + 1)
+                ckpt_mgr.set_value('wf_counter', ckpt_mgr.get_value('wf_counter') + 1)
 
         time.sleep(1)  # wait for some hooks like loggers to finish
         self.call_hook('after_run')
