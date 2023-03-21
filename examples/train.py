@@ -83,4 +83,6 @@ if __name__ == '__main__':
         log_config=log_config)
 
     ckpt_path = '/root/data/zheyu/ckpt/convnet'
+    if not os.path.exists(ckpt_path):
+        os.mkdir(ckpt_path)
     runner.run(ckpt_path, [trainloader], [('train', 1)])
